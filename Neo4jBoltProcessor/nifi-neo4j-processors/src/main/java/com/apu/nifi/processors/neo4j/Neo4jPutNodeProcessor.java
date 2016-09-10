@@ -2,8 +2,10 @@ package com.apu.nifi.processors.neo4j;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.nifi.annotation.lifecycle.OnRemoved;
@@ -11,6 +13,7 @@ import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
@@ -25,11 +28,10 @@ import org.neo4j.shell.util.json.JSONObject;
 
 public class Neo4jPutNodeProcessor extends Neo4jBoltAbstractProcessor{
 	
-	private Driver driver;
-	private Session session;
+	private Driver neo4jDriver;
+	private Session neo4jSession;
 	
-	private List<String> props;
-	private String cypherQuery;
+	private List<String> nodeProperties;
 	
 	public static final PropertyDescriptor NEO4J_NODE = new PropertyDescriptor.Builder()
             .name("neo4j-node")
@@ -78,17 +80,14 @@ public class Neo4jPutNodeProcessor extends Neo4jBoltAbstractProcessor{
 		
 		AuthToken token = AuthTokens.basic(user, pwd);
 		
-		driver = GraphDatabase.driver(url, token);
-		session = driver.session();
+		neo4jDriver = GraphDatabase.driver(url, token);
+		neo4jSession = neo4jDriver.session();
 		
-		String nodeName = context.getProperty(NEO4J_NODE).getValue();
-		
-		props = Arrays.asList(context.getProperty(NEO4J_NODE_PROPS).getValue().split(Neo4jProcessorConstants.COMMA));
-		buildCypherQuery(nodeName);
+		nodeProperties = Arrays.asList(context.getProperty(NEO4J_NODE_PROPS).getValue().split(Neo4jProcessorConstants.COMMA));
 	}
 
-	private void buildCypherQuery(String nodeName) {
-
+	private String buildCypherQuery(String nodeName, Iterable<String> props) {
+		String cypherQuery = null;
 		try {
 			JSONObject obj = new JSONObject();
 			
@@ -103,6 +102,7 @@ public class Neo4jPutNodeProcessor extends Neo4jBoltAbstractProcessor{
 		} catch (Exception e) {
 			// TODO: handle exception
 		}
+		return cypherQuery;
 	}
 
 	@Override
@@ -110,15 +110,41 @@ public class Neo4jPutNodeProcessor extends Neo4jBoltAbstractProcessor{
 	@OnRemoved
 	@OnUnscheduled
 	void closeNeo4jSession() {
-		session.close();
-		driver.close();
+		neo4jSession.close();
+		neo4jDriver.close();
 	}
 
 	@Override
 	public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
 		
+		FlowFile ff = session.get();
+		Map<String,Object> params = buildParamsMap(ff);
 		
+		String cypherQuery = buildCypherQuery(context.getProperty(NEO4J_NODE).getValue(), params.keySet());
 		
+		if(null != neo4jSession){
+			try {
+				neo4jSession.run(cypherQuery, params);
+				session.transfer(ff, REL_SUCCESS);
+			} catch (Exception e) {
+				session.transfer(ff, REL_FAILURE);
+			}
+		} else {
+			session.transfer(ff, REL_FAILURE);
+		}
+	}
+
+	private Map<String, Object> buildParamsMap(FlowFile ff) {
+
+		Map<String,Object> params = new HashMap<String,Object>();
+		
+		for(String prop : nodeProperties){
+			if(null != ff.getAttribute(prop.trim())){
+				params.put(prop.trim(), ff.getAttribute(prop.trim()));
+			} 
+		}
+		
+		return params;
 	}
 	
 	
